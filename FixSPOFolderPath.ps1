@@ -27,21 +27,16 @@ param(
 )
 
 # For Debug Mode adding Test data
-$Debug = $false
+$Debug = $true
 
 Connect-PnPOnline $siteUrl -ApplicationId $ApplicationId -Interactive
 
 $allfolderList = [System.Collections.ArrayList]::new()
 $missingfolderList = [System.Collections.ArrayList]::new()
-
-(Get-PnPListItem -List $listName -PageSize 5000 -Fields ("FileRef")).FieldValues |% { 
-  $folderpath = $_.FileRef.SubString(0, $_.FileRef.LastIndexOf("/"));
-  if (!$allfolderList.contains($folderpath))
-  {
-    $returnedlen = $allfolderList.Add($folderpath);
-  }
-}
-
+# Resume
+$list = Get-PnPList -Identity $listName
+$missingfolderFile = ("missingfolder_" + $list.Id + ".txt")
+$ApplicationId = "901bb72d-20fa-4034-b76d-9d654298edf2";
 function Add-MissingFolderList($folderPath)
 {
    if (!$missingfolderList.contains($folderPath))
@@ -51,6 +46,35 @@ function Add-MissingFolderList($folderPath)
    }
 }
 
+function Ensure-SPFolder($folderPath, [switch] $dummy)
+{
+  $retfolder = Resolve-PnPFolder $folderPath
+  if ($retfolder)
+  {
+    if ($dummy)
+    {
+      Write-Host "Dummy Folder Created: " $folderPath    <# Action when all if and elseif conditions are false #>
+    }
+    else 
+    {
+      Write-Host "Folder Created: " $folderPath    <# Action when all if and elseif conditions are false #>
+    }
+  }
+}
+
+function Remove-DummySPFolder($folderpath, $folderServerRelativePath)
+{
+    if ((Get-PnPFolder -Url $folderpath).ItemCount -eq 0)
+    {
+      $ret = Remove-PnPFolder -Folder $folderServerRelativePath.SubString(0, $folderServerRelativePath.LastIndexOf("/")) -Name $folderServerRelativePath.SubString($folderServerRelativePath.LastIndexOf("/")) -Force
+      Write-Host ("Dummy Folder Removed: " + $folderpath)
+    }
+    else 
+    {
+      Write-Host ("Dummy Folder is kept: " + $folderpath)      <# Action when all if and elseif conditions are false #>
+    }
+}
+
 ## ----
 ## DEBUG
 ## 
@@ -58,6 +82,7 @@ function Add-MissingFolderList($folderPath)
 ##-----
 if ($Debug)
 {
+  Write-Host "---Debug Mode---"
   # Add dummy folder here to check if we can appropriately identify the missing folder from the logic.
   $returnlen = $allfolderList.Add("/Shared Documents/General/subfolder1/subfolder2")
   # Add dummy missing folder (that actually exists) here to test the folder/file move behavior.
@@ -66,8 +91,25 @@ if ($Debug)
 }
 ## -----
 
+Write-Host "---Detection Process---"
+# Load from previous assessment. To avoid loss from crash or error.
+if (Test-Path $missingfolderFile)
+{
+  Get-Content $missingfolderFile | ForEach-Object {
+    Add-MissingFolderList -folderPath $_
+  }
+}
+
+(Get-PnPListItem -List $listName -PageSize 5000 -Fields ("FileRef")).FieldValues |ForEach-Object { 
+  $folderpath = $_.FileRef.SubString(0, $_.FileRef.LastIndexOf("/"));
+  if (!$allfolderList.contains($folderpath))
+  {
+    $returnedlen = $allfolderList.Add($folderpath);
+  }
+}
+
 $tempFolderPath = $null;
-$allfolderList |% {
+$allfolderList |ForEach-Object {
   try
   {
     $tempFolderPath = $_;
@@ -94,22 +136,34 @@ $allfolderList |% {
     }
   }
 }
+$missingfolderList | Add-Content $missingfolderFile
 
 if ($Fix)
 {
-  $missingfolderList |% {
-    $folder = Resolve-PnPFolder $_
-    Write-Host "Folder Created: " $_
-    (Get-PnPListItem -List $listName -FolderServerRelativeUrl ((Get-PnPWeb).ServerRelativeUrl + $_)) |% {
+  Write-Host
+  Write-Host "---Fix Process---"
+  $missingfolderList |ForEach-Object {
+    $folder = Ensure-SPFolder $_
+    #Dummy Folder
+    $dummyFolderPath = ($_ + "_" + $ApplicationId.Replace("-", "_"));
+    $dummyFolderServerRelativePath = ((Get-PnPWeb).ServerRelativeUrl + $dummyFolderPath);
+    Ensure-SPFolder $dummyFolderPath -Dummy
+
+    (Get-PnPListItem -List $listName -FolderServerRelativeUrl ((Get-PnPWeb).ServerRelativeUrl + $_)) |ForEach-Object {
       if ($_.FieldValues.FSObjType -eq 1)
       {
-        Move-PnPFolder -Folder $_.Folder -TargetFolder $_.FieldValues.FileDirRef 
+        $ret = Move-PnPFolder -Folder $_.Folder -TargetFolder $dummyFolderServerRelativePath;
+        $ret = Move-PnPFolder -Folder ($dummyFolderServerRelativePath + "/" + $_.FieldValues.FileLeafRef) -TargetFolder $_.FieldValues.FileDirRef
+        Write-Host ("Folder Moved: " + $_.FieldValues.FileRef)
       }
       else
       {
-        Move-PnPFile -SourceUrl $_.FieldValues.FileRef -TargetUrl $_.FieldValues.FileDirRef -Force
+        $ret = Move-PnPFile -SourceUrl $_.FieldValues.FileRef -TargetUrl $dummyFolderServerRelativePath -Force
+        $ret = Move-PnPFile -SourceUrl ($dummyFolderServerRelativePath + "/" + $_.FieldValues.FileLeafRef) -TargetUrl $_.FieldValues.FileDirRef -Force
+        Write-Host ("File Moved: " + $_.FieldValues.FileRef)
       }
     }
+    Remove-DummySPFolder -folderpath $dummyFolderPath -folderServerRelativePath $dummyFolderServerRelativePath
   }
 }
 
