@@ -27,7 +27,7 @@ param(
 )
 
 # For Debug Mode adding Test data
-$Debug = $true
+$Debug = $false
 
 Connect-PnPOnline $siteUrl -ApplicationId $ApplicationId -Interactive
 
